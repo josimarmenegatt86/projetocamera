@@ -4,6 +4,7 @@ import numpy as np
 import math
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
+from streamlit_webrtc import webrtc_streamer, RTCConfiguration
 import av
 
 # Configurações do Mediapipe
@@ -81,6 +82,20 @@ class VideoProcessor(VideoTransformerBase):
 # Interface do Streamlit
 st.title("🖐️ Air Drawing Web")
 st.write("Aproxime o **Indicador e o Polegar** para criar um círculo. Use o **Dedo Médio** para arrastá-los.")
+
+
+# Adicione isso antes do webrtc_streamer
+RTC_CONFIGURATION = RTCConfiguration(
+    {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
+)
+
+# No seu webrtc_streamer, adicione o rtc_configuration:
+webrtc_streamer(
+    key="air-drawing",
+    rtc_configuration=RTC_CONFIGURATION, # Esta linha é vital
+    video_frame_callback=callback, # Sua função de processamento
+    media_stream_constraints={"video": True, "audio": False},
+)
 
 webrtc_streamer(
     key="hand-drawing",
