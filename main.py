@@ -3,103 +3,79 @@ import mediapipe as mp
 import numpy as np
 import math
 import streamlit as st
-from streamlit_webrtc import webrtc_streamer, VideoTransformerBase
 from streamlit_webrtc import webrtc_streamer, RTCConfiguration
 import av
 
-# Configurações do Mediapipe
+# --- CONFIGURAÇÕES MEDIAPIPE ---
 mp_hands = mp.solutions.hands
 mp_drawing = mp.solutions.drawing_utils
 
-class VideoProcessor(VideoTransformerBase):
-    def __init__(self):
-        self.hands = mp_hands.Hands(min_detection_confidence=0.7, min_tracking_confidence=0.7)
-        self.shapes = []  # Lista de círculos: {"x", "y", "r"}
-        self.drawing_mode = False
-        self.fingers_touching = False
-        self.selected_shape = None
+# Inicializa o modelo de mãos
+hands_detector = mp_hands.Hands(
+    static_image_mode=False,
+    max_num_hands=1,
+    min_detection_confidence=0.7,
+    min_tracking_confidence=0.7
+)
 
-    def calculate_distance(self, x1, y1, x2, y2):
-        return math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2)
+# Estado da aplicação (para manter os desenhos na tela)
+if "shapes" not in st.session_state:
+    st.session_state.shapes = []
 
-    def fingers_are_open(self, landmarks):
-        # Lógica simplificada para o navegador
-        return landmarks[8].y < landmarks[6].y and landmarks[4].y < landmarks[2].y
+# --- LÓGICA DE PROCESSAMENTO ---
+def video_frame_callback(frame):
+    img = frame.to_ndarray(format="bgr24")
+    img = cv2.flip(img, 1)
+    h, w, _ = img.shape
 
-    def recv(self, frame):
-        img = frame.to_ndarray(format="bgr24")
-        img = cv2.flip(img, 1)
-        h, w, _ = img.shape
+    # Processamento Mediapipe
+    rgb_frame = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    result = hands_detector.process(rgb_frame)
 
-        rgb_frame = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-        result = self.hands.process(rgb_frame)
+    if result.multi_hand_landmarks:
+        for hand_landmarks in result.multi_hand_landmarks:
+            # Coordenadas dos dedos
+            lm = hand_landmarks.landmark
+            index_x, index_y = int(lm[8].x * w), int(lm[8].y * h)
+            thumb_x, thumb_y = int(lm[4].x * w), int(lm[4].y * h)
+            
+            # Cálculo de distância para criar círculo (Pinça: Polegar + Indicador)
+            distance = math.hypot(index_x - thumb_x, index_y - thumb_y)
+            
+            if distance < 40:
+                # Cria um novo círculo se a pinça for feita
+                st.session_state.shapes.append({"x": index_x, "y": index_y, "r": 20})
+                # Limita para não criar círculos infinitos (opcional)
+                if len(st.session_state.shapes) > 50:
+                    st.session_state.shapes.pop(0)
 
-        if result.multi_hand_landmarks:
-            for hand_landmarks in result.multi_hand_landmarks:
-                # Coordenadas dos dedos
-                index_x, index_y = int(hand_landmarks.landmark[8].x * w), int(hand_landmarks.landmark[8].y * h)
-                thumb_x, thumb_y = int(hand_landmarks.landmark[4].x * w), int(hand_landmarks.landmark[4].y * h)
-                middle_x, middle_y = int(hand_landmarks.landmark[12].x * w), int(hand_landmarks.landmark[12].y * h)
+            # Desenha o esqueleto da mão
+            mp_drawing.draw_landmarks(img, hand_landmarks, mp_hands.HAND_CONNECTIONS)
 
-                # Alternar modo de desenho (Polegar + Indicador)
-                distance = self.calculate_distance(index_x, index_y, thumb_x, thumb_y)
-                if distance < 40:
-                    if not self.fingers_touching:
-                        self.drawing_mode = not self.drawing_mode
-                        self.fingers_touching = True
-                else:
-                    self.fingers_touching = False
+    # Desenha as formas salvas
+    for shape in st.session_state.shapes:
+        cv2.circle(img, (shape["x"], shape["y"]), shape["r"], (0, 0, 255), -1)
 
-                # Lógica de Desenho
-                if self.drawing_mode:
-                    self.shapes.append({"x": index_x, "y": index_y, "r": 20})
-                    self.drawing_mode = False
+    return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-                # Lógica de Movimento (Dedo Médio)
-                if self.selected_shape is None:
-                    for shape in self.shapes:
-                        if self.calculate_distance(middle_x, middle_y, shape["x"], shape["y"]) < shape["r"]:
-                            self.selected_shape = shape
-                            break
-                else:
-                    self.selected_shape["x"], self.selected_shape["y"] = middle_x, middle_y
-                    if self.calculate_distance(middle_x, middle_y, self.selected_shape["x"], self.selected_shape["y"]) > 60:
-                        self.selected_shape = None
-
-                # Desenha esqueleto da mão
-                mp_drawing.draw_landmarks(img, hand_landmarks, mp_hands.HAND_CONNECTIONS)
-
-        # Desenha as formas salvas
-        for shape in self.shapes:
-            cv2.circle(img, (shape["x"], shape["y"]), shape["r"], (0, 0, 255), -1)
-
-        # Feedback visual do modo
-        color = (0, 255, 0) if self.fingers_touching else (255, 255, 255)
-        cv2.putText(img, f"Modo Desenho pronto", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
-
-        return av.VideoFrame.from_ndarray(img, format="bgr24")
-
-# Interface do Streamlit
+# --- INTERFACE STREAMLIT ---
+st.set_page_config(page_title="Air Drawing", layout="centered")
 st.title("🖐️ Air Drawing Web")
-st.write("Aproxime o **Indicador e o Polegar** para criar um círculo. Use o **Dedo Médio** para arrastá-los.")
+st.write("Aproxime o **Indicador e o Polegar** para criar círculos na tela!")
 
+if st.button("Limpar Desenho"):
+    st.session_state.shapes = []
 
-# Adicione isso antes do webrtc_streamer
+# Configuração de conexão para Cloud
 RTC_CONFIGURATION = RTCConfiguration(
     {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
 )
 
-# No seu webrtc_streamer, adicione o rtc_configuration:
 webrtc_streamer(
     key="air-drawing",
-    rtc_configuration=RTC_CONFIGURATION, # Esta linha é vital
-    video_frame_callback=callback, # Sua função de processamento
+    mode=None,
+    rtc_configuration=RTC_CONFIGURATION,
+    video_frame_callback=video_frame_callback,
     media_stream_constraints={"video": True, "audio": False},
-)
-
-webrtc_streamer(
-    key="hand-drawing",
-    video_transformer_factory=VideoProcessor,
-    rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}, # Necessário para rodar na nuvem
-    media_stream_constraints={"video": True, "audio": False},
+    async_processing=True,
 )
